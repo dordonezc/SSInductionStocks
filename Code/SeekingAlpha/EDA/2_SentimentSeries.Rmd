@@ -1,0 +1,120 @@
+---
+title: "Sentiment Series"
+author: "Sergio Potes"
+date: "2/3/2021"
+output: html_document
+---
+
+
+## Returns
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(lubridate)
+
+setwd("C:/Users/spc_1/Documents/SPC/EDUCACION/MSC_DATA_SCIENCE/Courses/ST498_Capstone_Project/Milestones/2nd_All_hands_meeting")
+usm <- read_csv("Sent_USmarkets_mean.csv")
+wsj <- read_csv("Sent_WSJ.csv") %>% group_by(Date) %>% summarise(Score = mean(Polarity))
+
+news <- inner_join(usm, wsj, "Date")[, 2:4] %>%
+  inner_join(read_csv("LogReturnData.csv")[,1:2], "Date") %>%
+  inner_join(read_csv("VarData.csv")[, 1:2], "Date")
+colnames(news) <- c("Date", "USM", "WSJ", "Returns_OEX", "Var_OEX")
+news <- mutate(news, Biwk_returns = (1 + (1 + Returns_OEX)^365-1)^(1/26)-1)
+
+news_piv <- pivot_longer(news, c("USM", "WSJ", "Returns_OEX"), "Source", values_to = "Score")
+
+## Line Plots
+ggplot(news, aes(Date, Returns_OEX)) + geom_line(color = "darkblue")
+ggplot(news_piv, aes(Date, Score)) + geom_line(aes(color = Source))
+# Smoothed Line plot
+source("RHKS_clasico.R")
+trend_news <- news %>% mutate(across(!Date, .fns = ~Get_trend(.x, "Henderson", m = 11))) 
+trend_news_piv <- pivot_longer(trend_news, c("USM", "WSJ", "Biwk_returns"))
+ggplot(trend_news_piv, aes(Date, value)) + geom_line(aes(color = name))
+#Scatter plot
+ggplot(news, aes(USM, Returns_OEX)) + geom_point()
+
+#ggplot(news_piv[1:90, ], aes(Date, Score)) + geom_line(aes(color = Source))
+#ggplot(subset(news_piv, Date >= "2020-01-01" & Date <= "2020-03-01"), aes(Date, Score)) + geom_line(aes(color = Source))
+#ggplot(news, aes(USM, WSJ)) + geom_point()
+
+
+
+```
+
+```{r}
+sp100 <- read_csv("CloseData.csv")[, 1:2]
+colnames(sp100)[2] <- "OEX"
+sp100 <- mutate(sp100, Returns_OEX = lag(log(lead(OEX)/OEX))*100) %>%
+  mutate(Return = if_else(Returns_OEX > 0, "Up", "Down")) %>% na.omit()
+
+summary(sp100$Returns_OEX)
+
+news_mth <- inner_join(news, sp100, "Date") %>%
+  mutate(Year_month = ymd(str_c(year(Date), '-', month(Date), '-', 1))) %>%
+  group_by(Year_month) %>% 
+  summarise(USM_Score = mean(USM), WSJ_Score = mean(WSJ), OEX = mean(OEX)) 
+
+news_mth <- mutate(news_mth, Returns_OEX = c(NA, diff(log(OEX)))) %>% na.omit()
+news_mth_piv <- pivot_longer(news_mth, c("USM_Score", "WSJ_Score", "Returns_OEX"))
+ggplot(news_mth_piv, aes(Year_month, value)) + geom_line(aes(color = name))
+
+
+cor(news_mth$USM_Score, news_mth$Returns_OEX)
+## Words as predictors
+```
+
+
+## Variance
+
+```{r}
+## Line Plots
+ggplot(news, aes(Date, Var_OEX)) + geom_line(color = "darkblue")
+# Smoothed Line plot
+source("RHKS_clasico.R")
+ggplot(news, aes(Date, Get_trend(Var_OEX, "Henderson", m = 11))) + geom_line(color = "darkblue")
+#Scatter plot
+ggplot(news, aes(USM, Var_OEX)) + geom_point()
+
+```
+
+```{r}
+#saveRDS(newscp_day, "Daily_news.rds")
+newscp_day <- read_rds("Daily_news.rds")
+news <- mutate(news, Direction = if_else(Returns_OEX > 0, "Up", "Down"))
+
+newsdf_day <- data.frame(Date = date(names(newscp_day)), Text = texts(newscp_day))
+rownames(newsdf_day) <- 1:nrow(newsdf_day)
+newsdf_day <- inner_join(newsdf_day, select(news, Date, Direction), "Date")
+head(newsdf_day)
+newscp_day <- corpus(newsdf_day$Text)
+docvars(newscp_day, "Direction") <- newsdf_day$Direction
+docvars(newscp_day, "Date") <- newsdf_day$Date
+
+# 2019 - 2020
+newsdfm_dir <- dfm(newscp_day, groups = "Direction", tolower = T, remove_punct = T, remove = c("entk:ent", "numb-numb", "vs", "d", "we've", "q", "april"))
+textstat_keyness(newsdfm_dir, target = docvars(newsdfm_dir)$Direction == "Up", measure = "chi2") %>% textplot_keyness()
+
+# 2019
+newsdfm_dir <- dfm(corpus_subset(newscp_day, year(Date) == 2019), groups = "Direction", tolower = T, remove_punct = T, remove = c("entk:ent", "numb-numb", "vs", "d", "we've", "q", "numk", "qnum", "would", "november", "march", "october", "february", "ent's"))
+textstat_keyness(newsdfm_dir, target = docvars(newsdfm_dir)$Direction == "Up", measure = "chi2") %>% textplot_keyness()
+
+# 2020
+newsdfm_dir <- dfm(corpus_subset(newscp_day, year(Date) == 2020), groups = "Direction", tolower = T, remove_punct = T, remove = c("entk:ent", "numb-numb", "vs", "d", "we've", "q", "numk", "qnum", "would", "november", "march", "october", "february", "ent's", "january", "am", "pm"))
+textstat_keyness(newsdfm_dir, target = docvars(newsdfm_dir)$Direction == "Up", measure = "chi2") %>% textplot_keyness()
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,267 @@
+---
+title: "SeekingAlpha US Markets"
+author: "Sergio Potes"
+date: "12/4/2021"
+output: html_document
+---
+
+## Loading needed packages
+```{r, warning = FALSE}
+library(tidyverse)
+library(quanteda)
+library(quanteda.dictionaries)
+library(lubridate)
+library(glmnet)
+```
+
+## Loading data
+```{r, warning = FALSE}
+setwd("Data/Raw")
+
+# Vector with the file names
+file_names = list.files(pattern="*.csv")
+
+# Reading data (documents) as a list of data frames
+data <- NULL
+for (file in file_names){
+  df <- read_csv(file, col_types = cols())
+  data <- bind_rows(data, df)
+}
+
+# Filtering data and checking duplicates
+colnames(data) <- c("Num", "Date", "Title", "Text")
+data <- data %>% select(!Num) %>% mutate(Date = mdy_hm(Date)) %>% arrange(Date) %>% filter(between(Date, as.POSIXct("2018-10-01"), as.POSIXct("2021-02-28")))
+data <- data[!(duplicated(data$Text)),]
+
+```
+
+## EDA - Corpus description
+```{r}
+news_cp <- data$Text %>% corpus()
+news_summ <- textstat_summary(news_cp)
+data <- cbind(data, news_summ[, 2:8])
+rm(news_summ)
+summary(data[, 4:10])
+
+# Group by year-month
+mth_data <- data %>% mutate(Year = year(Date), Month = month(Date)) %>% group_by(Year, Month) %>% summarise(No_words = sum(tokens), No_news = n(), .groups = "drop")
+mth_data <- mth_data %>% mutate(Year_month = date(str_c(Year, "-", Month, "-", "01")))
+
+# Pivot data and plot the number of articles and words per month
+piv_mth <- mth_data %>% pivot_longer(c(No_words, No_news))
+ggplot(piv_mth, aes(Year_month, value, color = name)) + geom_line() + facet_grid(name ~ ., scales = "free_y", switch = "y") + theme(panel.background = element_rect(fill = "white", colour = "gray80"))
+
+# Period with the highest number of news articles
+mth_data %>% filter(No_news == max(No_news))
+
+# Average number of news articles before covid
+mth_data %>% filter(Year < 2020) %>% summarise(across(c(No_words, No_news), mean))
+
+```
+
+
+## More plots of the corpus
+```{r}
+# PDF of the number of tokens (word count) per article
+ggplot(data[data$tokens < 450,] ,aes(x= tokens)) + geom_density(alpha=.3, fill="#3214c7") + geom_vline(xintercept = median(data$tokens), linetype="dashed", color = "darkblue") + theme(panel.background = element_rect(fill = "white", colour = "gray80"))
+
+# PDF of the number of types (unique words) per article
+ggplot(data[data$types < 275,] ,aes(x= types)) + geom_density(alpha=.3, fill="#38a32c") + geom_vline(xintercept = median(data$types), linetype="dashed", color = "darkgreen") + theme(panel.background = element_rect(fill = "white", colour = "gray80"))
+
+# Boxplot (numbers, symbols, sentences)
+nums_n_symb <- data %>% select(c(Date, numbers, symbols)) %>% pivot_longer(c(numbers, symbols))
+ggplot(filter(nums_n_symb, value <= 8), aes(value, name)) + geom_boxplot(aes(fill = name)) + theme(panel.background = element_rect(fill = "white", colour = "gray80"))
+
+# Percentage of documents with at least one symbol
+data %>% filter(symbols > 0) %>% nrow()/nrow(data)*100
+```
+
+## Methods description
+```{r}
+# Wald test
+wald_test <- function(x, y) {
+  Ho <- mean(x) - mean(y)
+  n <- length(x)
+  m <- length(y)
+  SE <- (var(x)/n + var(y)/m) %>% sqrt()
+  Tc <- Ho/SE
+  return(cat("Two Sample Wald-test", "\n", "p-value:", 1 - pnorm(Tc)))
+}
+
+# Reading S&P100 index and computing log-returns
+snp <- read_csv("Data/CloseData.csv", col_types = cols())
+snp <- snp %>% mutate(Date = dmy(Date)) %>% filter(Date < date("2021-03-01"))
+snp <- snp %>% arrange(Date) %>% mutate(Returns = log(OEX/lag(OEX)), Direction = if_else(Returns > 0, "Up", "Down")) %>% na.omit()
+table(snp$Direction)
+```
+
+## Results
+```{r}
+# Documents stats
+day_data <- data %>% mutate(Day = date(Date)) %>% group_by(Day) %>% summarise(across(tokens:symbols, sum))
+day_data <- day_data %>% inner_join(select(snp, Date, Direction), c("Day" = "Date"))
+# mean by direction
+day_data %>% group_by(Direction) %>% summarise(across(!Day, list(mean = mean)))
+
+# Tokens
+x_tokens <- day_data$tokens[day_data$Direction == "Down"]
+y_tokens <- day_data$tokens[day_data$Direction == "Up"]
+wald_test(x_tokens, y_tokens)
+t.test(x_tokens, y_tokens, alternative = "greater", var.equal = F)
+# wald: 0.1042 t: 0.1045
+
+# Types
+x_types <- day_data$types[day_data$Direction == "Down"]
+y_types <- day_data$types[day_data$Direction == "Up"]
+wald_test(x_types, y_types)
+t.test(x_types, y_types, alternative = "greater", var.equal = F)
+# wald: 0.0967 t: 0.0970
+
+# Punctuation marks
+x_puncts <- day_data$puncts[day_data$Direction == "Down"]
+y_puncts <- day_data$puncts[day_data$Direction == "Up"]
+wald_test(x_puncts, y_puncts)
+t.test(x_puncts, y_puncts, alternative = "greater", var.equal = F)
+# wald: 0.0536 t: 0.0539
+```
+
+## Levels of complexity
+```{r}
+## Lexical Diversity
+day_cp <- texts(data$Text, groups = date(data$Date)) %>% corpus()
+lexdiv <- day_cp %>% tokens() %>% textstat_lexdiv(c("TTR", "C", "U", "S", "K", "I", "D"))
+lexdiv <- lexdiv %>% rename(Date = document) %>% mutate(Date = date(Date))
+lexdiv <- lexdiv %>% inner_join(select(snp, Date, Direction), "Date")
+# mean of seven measures
+lexdiv %>% group_by(Direction) %>% summarise(across(!Date, list(mean = mean)))
+
+# Type-Token Ratio
+x_TTR <- lexdiv$TTR[lexdiv$Direction == "Up"]
+y_TTR <- lexdiv$TTR[lexdiv$Direction == "Down"]
+wald_test(x_TTR, y_TTR)
+
+# Summer's index
+x_S <- lexdiv$S[lexdiv$Direction == "Up"]
+y_S <- lexdiv$S[lexdiv$Direction == "Down"]
+wald_test(x_S, y_S)
+
+# Simpson's D
+x_D <- lexdiv$D[lexdiv$Direction == "Up"]
+y_D <- lexdiv$D[lexdiv$Direction == "Down"]
+wald_test(x_D, y_D)
+
+## Readability scores
+readability <- textstat_readability(day_cp) %>% rename(Date = document) %>% mutate(Date = date(Date))
+readability <- readability %>% inner_join(select(snp, Date, Direction), "Date")
+readability %>% group_by(Direction) %>% summarise(Flesch_mean = mean(Flesch))
+
+x_Flesch <- readability$Flesch[readability$Direction == "Down"]
+y_Flesch <- readability$Flesch[readability$Direction == "Up"]
+wald_test(x_Flesch, y_Flesch)
+
+```
+
+## Keyness analysis
+```{r}
+# Before and after Covid
+data <- data %>% mutate(Day = date(Date))
+non_ticker <- str_replace_all(data$Text, "[A-Z]{3,4}", "TICKER")
+news_cp <- corpus(non_ticker, docvars = select(data, Day))
+exclude <- c("above", "below", "up", "down", "on", "off", "over", "under", "few", "more", "most")
+sw <- stopwords()[!(stopwords() %in% exclude)]
+remove_words <- c("ticker", "tickerx", "tickerd-19", "tickerk:ticker", '"', "pm", "%", ",", "said", "s", "sh", "p", "&", "previously", "saying", "declines", "d", "-1.4", "april", "vs", "march")
+news_dfm <- dfm(news_cp, remove = c(sw, remove_words), remove_numbers = T)
+textstat_keyness(news_dfm, target = data$Day > date("2019-12-31"), "chi2") %>% textplot_keyness()
+
+# Market Direction
+day_news <- data.frame(Text = day_cp, Date = date(names(day_cp)), row.names = 1:ndoc(day_cp))
+day_news <- day_news %>% inner_join(select(snp, c(Date, Direction)), "Date")
+day_nonticker <- str_replace_all(day_news$Text, "[A-Z]{3,4}", "TICKER")
+day_dfm <- dfm(corpus(day_nonticker), remove = c(sw, remove_words), remove_numbers = T)
+textstat_keyness(day_dfm, target = day_news$Direction == "Up", "chi2") %>% textplot_keyness()
+
+```
+
+## Dictionaries
+```{r}
+
+pos.words <- data_dictionary_LoughranMcDonald[['POSITIVE']]
+neg.words <- data_dictionary_LoughranMcDonald[['NEGATIVE']]
+Mcd_dict <- dictionary(list(positive = pos.words, negative = neg.words))
+day_sent <- dfm(day_cp, dictionary = Mcd_dict) %>% convert("data.frame") %>% rename(Date = doc_id) %>% mutate(Date = date(Date))
+day_sent <- day_sent %>% mutate(Score = coalesce((positive - negative)/(positive + negative), 0))
+day_sent <- day_sent %>% inner_join(snp, "Date")
+day_sent %>% group_by(Direction) %>% summarise(Score_mean = mean(Score))
+
+# Wald test
+x_score <- day_sent$Score[day_sent$Direction == "Up"]
+y_score <- day_sent$Score[day_sent$Direction == "Down"]
+wald_test(x_score, y_score)
+t.test(x_score, y_score, alternative = "greater", var.equal = F)
+
+
+mth_sent <- day_sent %>% mutate(Year = year(Date), Month = month(Date)) %>% group_by(Year, Month) %>% summarise(Score_mean = mean(Score), OEX_mean = mean(OEX), .groups = "drop")
+mth_sent <- mth_sent %>% mutate(Year_month = date(str_c(Year, "-", Month, "-", "01")))
+mth_sent <- mth_sent %>% mutate(Returns_OEX = c(NA, diff(log(OEX_mean)))) %>% na.omit()
+piv_mth_sent <- mth_sent %>% pivot_longer(c(Returns_OEX, Score_mean))
+ggplot(piv_mth_sent, aes(Year_month, value, color = name)) + geom_line() + facet_grid(name ~ ., scales = "free_y", switch = "y") + theme(panel.background = element_rect(fill = "white", colour = "gray80"))
+cor(mth_sent$Score_mean, mth_sent$Returns_OEX)
+
+```
+
+## Modelling
+```{r}
+
+model_df <- dfm(day_cp, stem = T, remove = c(sw, remove_words), remove_numbers = T, remove_punct = T, remove_url = T, remove_symbols = T) %>% dfm_trim(min_docfreq = 4) %>% convert("data.frame") %>% rename(Date = doc_id) %>% mutate(Date = date(Date)) 
+
+model_df <- model_df %>% inner_join(day_data, c("Date" = "Day")) %>% left_join(select(day_sent, Date, Score), "Date")
+y <- model_df$Direction
+model_df <- model_df %>% select(!c(Direction, Date))
+
+smp <- sample(c("train", "test"), size=nrow(model_df), prob = c(0.80, 0.20), replace=TRUE)
+train <- which(smp=="train")
+test <- which(smp=="test")
+
+lasso <- cv.glmnet(x = as.matrix(model_df[train, ]), y = y[train], family = "binomial", alpha = 1, nfolds = 5) 
+plot(lasso)
+
+```
+## Confusion matrix function
+```{r}
+metrics <- function(mytable, verbose=TRUE) {
+    truePositives <- mytable[1,1]
+    falsePositives <- sum(mytable[1,]) - truePositives
+    falseNegatives <- sum(mytable[,1]) - truePositives
+    precision <- truePositives / (truePositives + falsePositives)
+    recall <- truePositives / (truePositives + falseNegatives)
+    accuracy <- (truePositives + mytable[2,2])/sum(mytable)
+    f1score <- (precision*recall)/(precision+recall)*2
+    if (verbose) {
+        print(mytable)
+        cat("\n precision =", round(precision, 2), 
+            "\n    recall =", round(recall, 2), "\n")
+    }
+    else {
+        print(mytable)
+        cat("\n accuracy =", round(accuracy, 2), 
+            "\n f1 score =", round(f1score, 2), "\n")
+    }
+    invisible(c(precision, recall))
+}
+```
+
+
+## Confusion matrix results
+```{r}
+preds <- predict(lasso, as.matrix(model_df[test,]), type="class")
+cm <- table(preds, y[test])
+cm <- cm[2:1, 2:1]
+metrics(cm)
+metrics(cm, F)
+
+# Baseline
+table(y)[2]/sum(table(y))
+
+
+
+```

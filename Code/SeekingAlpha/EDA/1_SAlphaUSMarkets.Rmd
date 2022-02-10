@@ -1,0 +1,214 @@
+---
+title: "SeekingAlpha US Markets"
+author: "Sergio Potes"
+date: "17/2/2021"
+output: html_document
+---
+
+```{r}
+setwd("C:/Users/spc_1/Documents/SPC/EDUCACION/MSC_DATA_SCIENCE/Courses/ST498_Capstone_Project/Seeking_Alpha")
+library(reticulate)
+library(tidyverse)
+library(tidytext)
+library(quanteda)
+library(spacyr)
+library(lubridate)
+library(quanteda.dictionaries)
+
+data <- read_csv("SeekingAlphaUSMarkets.csv")
+```
+
+## Functions
+```{r}
+## get_content: Identifies asset names (3 or 4 letters together in upper case) and numbers (beginning with -/+/$, separated by dot/comma, ending with M/%/$). Returns the documents replacing the assest names with "ENT" and the numbers with NUM. Also returns the asset names and numbers replaced.
+
+get_content <- function(x){
+  ## Parse Stock names
+  x <- str_replace_all(x, "COVID", "covid")
+  pat <- "[A-Z]{3,4}"
+  ents <- str_extract_all(x, pat)[[1]]
+  new_x <- str_replace_all(x, pat, "ENT")
+  ## Parse Numbers
+  pat <- "[-\\+\\$]?[0-9]{1}[0-9,\\.:]*[M\\%\\$]?"
+  nums <- str_extract_all(new_x, pat)[[1]]
+  nums <- str_remove_all(nums, "[\\.,]$")
+  new_x <- str_replace_all(new_x, pat, "NUM")
+  list(new_x, list(nums, ents))
+}
+
+## Spacy Parser: Tokenize, removing punctuation marks and stopwords. Returns the tokens, its part of speech (POS), and the entities with its type.
+
+spacy_parser <- function(x){
+  parsed_txt <- spacy_parse(x,entity = TRUE, lemma = FALSE)
+  tokens <- spacy_tokenize(x, remove_punct = T)
+  doc_ents <- entity_extract(parsed_txt) %>% 
+    filter(!(entity == "ENT" | str_detect(entity, "NUM.?"))) %>%
+    select(entity, entity_type)
+  relevant <- parsed_txt %>% filter(token %in% tokens$text1) %>%
+    mutate(token=ifelse(token %in% c("ENT", "NUM"), token, str_to_lower(token))) %>%
+    anti_join(tidytext::stop_words, by=c("token"="word"))
+  toks <- relevant %>% select(token) %>% pull()
+  pos <- relevant %>% select(pos) %>% pull()
+  list(toks, pos, doc_ents)
+}
+```
+
+## Daniel
+```{r}
+## Get parsed content
+new_data <- map(data$Text[1:100], get_content)
+class(new_data)
+length(new_data)
+new_data[[1]]
+
+## Pluck text
+txt_vec <- map(new_data,1)
+class(txt_vec)
+length(txt_vec)
+txt_vec[[1]]
+
+## Bring spacy to tag
+spacy_initialize(model = "en_core_web_sm", condaenv = "C:/Users/spc_1/anaconda3")
+
+## Spacy parse
+txt_spacy <- map(txt_vec, spacy_parser)
+class(txt_spacy)
+length(txt_spacy)
+txt_spacy[[1]]
+
+## End Spacy
+spacy_finalize()
+
+
+## Generate full data
+txt_spacy[[100]]
+data$Text[[100]]
+
+
+```
+
+## EDA
+```{r}
+content <- map(data$Text, get_content)
+news_cp <- map(content, 1) %>% unlist() %>% corpus()
+news_summ <- textstat_summary(news_cp)
+numbers <- map(content, 2) %>% map(1) %>% map(length) %>% unlist()
+assets <- map(content, 2) %>% map(2) %>% map(length) %>% unlist()
+data <- cbind(news_summ[, 1:6], numbers, assets, Datetime = data$Date, Text = data$Text)
+rm(news_summ)
+summary(data[, 2:8])
+
+```
+
+
+
+```{r}
+library(ggplot2)
+
+ggplot(data[data$tokens < 400,] ,aes(x= tokens)) + geom_density(alpha=.3, fill="#3214c7") + geom_vline(xintercept = median(data$tokens), linetype="dashed", color = "darkblue")
+
+ggplot(data[data$types < 250,] ,aes(x= types)) + geom_density(alpha=.3, fill="#38a32c") + geom_vline(xintercept = median(data$types), linetype="dashed", color = "darkgreen")
+
+ggplot(data[data$assets < 20,] ,aes(x= assets)) + geom_density(alpha=.3, fill="#1db3a4") + geom_vline(xintercept = median(data$assets), linetype="dashed", color = "darkblue")
+
+
+# boxplot
+library(reshape2)
+df1 <- melt(data[, c("sents", "numbers")])
+ggplot(df1[df1$value < 20,], aes(variable, x = value)) + geom_boxplot(outlier.colour="#b02edb", outlier.shape = 3, outlier.size = 2, fill = "#cb64ed")
+
+```
+
+## More plots
+```{r}
+# Detecting keywords (keyness)
+data$Month <- month(data$Datetime)
+docvars(news_cp, "Month") <- data$Month
+data$Year <- year(data$Datetime)
+docvars(news_cp, "Year") <- data$Year
+data$date <- date(data$Datetime)
+docvars(news_cp, "Date") <- data$date
+
+news_dfm <- dfm(news_cp, groups = c("Year", "Month"), stem = F, remove = stopwords("en"), remove_punct = T, remove_numbers = T, remove_url = T)
+textstat_keyness(news_dfm, target = docvars(news_dfm)$Year == 2020, measure="chi2") %>% textplot_keyness()
+
+# Freq by month
+newscp_mth <- texts(news_cp, groups = c("Year", "Month")) %>% corpus()
+newsdf_mth <- summary(newscp_mth)
+newsdf_mth$Text <- ifelse(nchar(newsdf_mth$Text) == 6, str_replace_all(newsdf_mth$Text, "\\.", "-0"), str_replace_all(newsdf_mth$Text, "\\.", "-"))
+newsdf_mth$Text <- str_c(newsdf_mth$Text,"-01") %>% date()
+
+ggplot(newsdf_mth, aes(x = Text)) + geom_line(aes(y = Tokens), color = "darkblue") + ylab("Word count") + xlab("Time")
+newsdf_mth$Text[which.max(newsdf_mth$Tokens)] # Highest number of tokens
+
+```
+
+
+## Dictionaries
+```{r}
+data(data_dictionary_LoughranMcDonald)
+data_dictionary_LoughranMcDonald
+pos.words <- data_dictionary_LoughranMcDonald[['POSITIVE']]
+neg.words <- data_dictionary_LoughranMcDonald[['NEGATIVE']]
+Mcd_dict <- dictionary(list(positive = pos.words, negative = neg.words))
+
+# Monthly dict
+sent <- dfm(newscp_mth, dictionary = Mcd_dict)
+newsdf_mth$Score <- (as.numeric(sent[,1]) - as.numeric(sent[,2]))/(as.numeric(sent[,1]) + as.numeric(sent[,2]))
+
+# Min: -1, Max: 1
+ggplot(newsdf_mth, aes(x = Text)) + geom_line(aes(y = Score), color = "darkred") + geom_line(aes(y = mean(Score)), color = "black", linetype = "dashed") + ylab("Score") + xlab("Time")
+newsdf_mth$Text[which.min(newsdf_mth$Score)] # Highest number of tokens
+
+# Daily dict v1
+newscp_day <- texts(news_cp, groups = "Date") %>% corpus()
+sent_day <- dfm(newscp_day, dictionary = Mcd_dict)
+newsdf_day <- convert(sent_day, to = "data.frame") %>%
+  mutate(doc_id = date(doc_id))
+newsdf_day$Score <- (newsdf_day$positive - newsdf_day$negative) / (newsdf_day$positive + newsdf_day$negative)
+newsdf_day$Score[is.na(newsdf_day$Score)] <- 0
+
+ggplot(newsdf_day, aes(x = doc_id)) + geom_line(aes(y = Score), color = "darkred")  +
+  geom_line(aes(y = mean(Score)), linetype = "dashed") + ylab("Score") + xlab("Date")
+
+
+# Daily dict v2
+sent_day2 <- dfm(news_cp, dictionary = Mcd_dict)
+newsdf2_day <- convert(sent_day2, to = "data.frame")
+newsdf2_day <-  mutate(newsdf2_day, Score = coalesce((positive - negative)/(positive + negative), 0))
+newsdf2_day <- mutate(newsdf2_day, Date = data$date) %>% group_by(Date) %>% summarise(Score = mean(Score))
+#write.csv(newsdf2_day, "Sent_USmarkets_v2.csv")
+```
+
+
+
+## Pendiente
+```{r}
+## Bring spacy to tag
+spacy_initialize(model = "en_core_web_sm", condaenv = "C:/Users/spc_1/anaconda3")
+
+## Spacy parse (pendiente de incluir en data)
+map(map(map(data$Text[1:2], spacy_parser), 2), table)
+map(map(data$Text[1:2], spacy_parser), 2)
+
+## End Spacy
+spacy_finalize()
+
+# change granularity (by day)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
